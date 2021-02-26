@@ -71,8 +71,7 @@ func createLine(level int, content string) string {
 	}
 }
 
-func downloadBlob(wg *sync.WaitGroup, blobName string, containerUrl az.ContainerURL) string {
-	defer wg.Done()
+func downloadBlob(blobName string, containerUrl az.ContainerURL) string {
 	blobURL := containerUrl.NewBlockBlobURL(blobName)
 	downloadResponse, err := blobURL.Download(context.Background(), 0, azblob.CountToEnd, azblob.BlobAccessConditions{}, false)
 
@@ -114,29 +113,55 @@ func parseContainer(container az.ContainerItem, p pipeline.Pipeline, accountName
 		listBlob, _ := containerServiceURL.ListBlobsFlatSegment(ctx, marker, azblob.ListBlobsSegmentOptions{Details: azblob.BlobListingDetails{Metadata: true}})
 		blobMarker = listBlob.NextMarker
 		blobItems := listBlob.Segment.BlobItems
-		output = output + parseBlobs(blobItems, blobFilter, showContent)
+		output = output + parseBlobs(blobItems, blobFilter, showContent, containerServiceURL)
 	}
-	//c <- containerServiceURL.String()
+
 	c <- output
 }
 
-func parseBlobs(blobItems []az.BlobItemInternal, blobFilter string, showContent bool) string {
-	var output = ""
+func parseBlobs(blobItems []az.BlobItemInternal, blobFilter string, showContent bool, containerURL azblob.ContainerURL) string {
+	var blobWg sync.WaitGroup
+	bc := make(chan string)
+
+	output := ""
 	for _, blobItem := range blobItems {
 		if len(blobFilter) > 0 && !strings.Contains(blobItem.Name, blobFilter) {
 			continue
 		}
-		output = output + createLine(1, fmt.Sprintf("Blob: %s\n", blobItem.Name))
-		output = output + createLine(2, fmt.Sprintf("Blob Type: %s\n", blobItem.Properties.BlobType))
-		output = output + createLine(2, fmt.Sprintf("Content MD5: %s\n", b64.StdEncoding.EncodeToString(blobItem.Properties.ContentMD5)))
-		output = output + createLine(2, fmt.Sprintf("Created at: %s\n", blobItem.Properties.CreationTime))
-		output = output + createLine(2, fmt.Sprintf("Last modified at: %s\n", blobItem.Properties.LastModified))
-		output = output + createLine(2, fmt.Sprintf("Lease Status: %s\n", blobItem.Properties.LeaseStatus))
-		output = output + createLine(2, fmt.Sprintf("Lease State: %s\n", blobItem.Properties.LeaseState))
-		output = output + createLine(2, fmt.Sprintf("Lease Duration: %s\n", blobItem.Properties.LeaseDuration))
+		blobWg.Add(1)
+		go createBlobOutput(blobItem, &blobWg, bc, showContent, containerURL)
 	}
-	fmt.Println(output)
+
+	go func() {
+		blobWg.Wait()
+		close(bc)
+	}()
+
+	// channel to print
+	for elem := range bc {
+		output = output + elem
+	}
 	return output
+}
+
+func createBlobOutput(blobItem az.BlobItemInternal, wg *sync.WaitGroup, c chan string, downloadContent bool, containerURL azblob.ContainerURL) {
+	defer wg.Done()
+	var output = ""
+	output = output + createLine(1, fmt.Sprintf("Blob: %s\n", blobItem.Name))
+	output = output + createLine(2, fmt.Sprintf("Blob Type: %s\n", blobItem.Properties.BlobType))
+	output = output + createLine(2, fmt.Sprintf("Content MD5: %s\n", b64.StdEncoding.EncodeToString(blobItem.Properties.ContentMD5)))
+	output = output + createLine(2, fmt.Sprintf("Created at: %s\n", blobItem.Properties.CreationTime))
+	output = output + createLine(2, fmt.Sprintf("Last modified at: %s\n", blobItem.Properties.LastModified))
+	output = output + createLine(2, fmt.Sprintf("Lease Status: %s\n", blobItem.Properties.LeaseStatus))
+	output = output + createLine(2, fmt.Sprintf("Lease State: %s\n", blobItem.Properties.LeaseState))
+	output = output + createLine(2, fmt.Sprintf("Lease Duration: %s\n", blobItem.Properties.LeaseDuration))
+
+	if downloadContent {
+		content := downloadBlob(blobItem.Name, containerURL)
+		output = output + createLine(2, fmt.Sprintf("Content: %s\n", content))
+	}
+
+	c <- output
 }
 
 func exec(args arguments) {
