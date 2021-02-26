@@ -1,7 +1,7 @@
 # go-storage-information
 
 This tool was build to get quickly and easy Information about Azure Blobs.
-It prints basic attributes and set metadata on blobs.
+It prints basic attributes and gets metadata from blobs.
 It is also possible to download the content of blobs wether to stdout or to a file.
 Furthermore it is possible to filter for a certain Storage Container Names or/and Blob names.
 
