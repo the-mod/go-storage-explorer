@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	b64 "encoding/base64"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/url"
@@ -17,6 +18,21 @@ import (
 	az "github.com/Azure/azure-storage-blob-go/azblob"
 	"github.com/spf13/cobra"
 )
+
+type blob struct {
+	Name       string            `json:"name"`
+	Content    bytes.Buffer      `json:"content"`
+	Properties map[string]string `json:"Properties"`
+}
+
+type container struct {
+	Name  string `json:"name"`
+	Blobs []blob `json:"blobs"`
+}
+
+type storageAccount struct {
+	Container []container `json:"container"`
+}
 
 type arguments struct {
 	AccountName   string
@@ -57,7 +73,6 @@ func init() {
 }
 
 func createLine(level int, content string) string {
-
 	if level == 0 {
 		return content
 	} else {
@@ -72,7 +87,7 @@ func createLine(level int, content string) string {
 	}
 }
 
-func downloadBlob(blobName string, containerUrl az.ContainerURL) string {
+func downloadBlob(blobName string, containerUrl az.ContainerURL) bytes.Buffer {
 	blobURL := containerUrl.NewBlockBlobURL(blobName)
 	downloadResponse, err := blobURL.Download(context.Background(), 0, azblob.CountToEnd, azblob.BlobAccessConditions{}, false)
 
@@ -88,43 +103,47 @@ func downloadBlob(blobName string, containerUrl az.ContainerURL) string {
 		log.Fatalf("Error reading blob %s", blobName)
 	}
 
-	return downloadedData.String()
+	return downloadedData
 }
 
 func storeBlobContent(f *os.File, content string) {
 	f.WriteString(fmt.Sprintf("%s\n", content))
 }
 
-func parseContainer(container az.ContainerItem, p pipeline.Pipeline, accountName string, containerFilter string, blobFilter string, showContent bool, c chan string, wg *sync.WaitGroup, marker az.Marker) {
+func parseContainer(azContainer az.ContainerItem, p pipeline.Pipeline, accountName string, containerFilter string, blobFilter string, showContent bool, c chan *container, wg *sync.WaitGroup, marker az.Marker) {
 	defer wg.Done()
-	containerName := container.Name
+	containerName := azContainer.Name
 
 	// TODO substring match? to match containers: ['test-1', 'test-2'], term: 'test, matches ['test-1', 'test-2']
 	if len(containerFilter) > 0 && !strings.Contains(containerName, containerFilter) {
 		return
 	}
 
+	// new returns pointer
+	containerResult := new(container)
+	containerResult.Name = containerName
+
 	containerURL, _ := url.Parse(fmt.Sprintf("https://%s.blob.core.windows.net/%s", accountName, containerName))
 	containerServiceURL := azblob.NewContainerURL(*containerURL, p)
 
 	ctx := context.Background()
 
-	var output = createLine(0, containerServiceURL.String()+"\n")
+	//var output = createLine(0, containerServiceURL.String()+"\n")
 	for blobMarker := (azblob.Marker{}); blobMarker.NotDone(); {
 		listBlob, _ := containerServiceURL.ListBlobsFlatSegment(ctx, marker, azblob.ListBlobsSegmentOptions{Details: azblob.BlobListingDetails{Metadata: true}})
 		blobMarker = listBlob.NextMarker
 		blobItems := listBlob.Segment.BlobItems
-		output = output + parseBlobs(blobItems, blobFilter, showContent, containerServiceURL)
+		containerResult.Blobs = parseBlobs(containerResult, blobItems, blobFilter, showContent, containerServiceURL)
 	}
 
-	c <- output
+	c <- containerResult
 }
 
-func parseBlobs(blobItems []az.BlobItemInternal, blobFilter string, showContent bool, containerURL azblob.ContainerURL) string {
+func parseBlobs(containerResult *container, blobItems []az.BlobItemInternal, blobFilter string, showContent bool, containerURL azblob.ContainerURL) []blob {
 	var blobWg sync.WaitGroup
-	bc := make(chan string)
+	bc := make(chan blob)
 
-	output := ""
+	blobs := make([]blob, len(blobItems))
 	for _, blobItem := range blobItems {
 		if len(blobFilter) > 0 && !strings.Contains(blobItem.Name, blobFilter) {
 			continue
@@ -140,29 +159,36 @@ func parseBlobs(blobItems []az.BlobItemInternal, blobFilter string, showContent 
 
 	// channel to print
 	for elem := range bc {
-		output = output + elem
+		blobs = append(blobs, elem)
 	}
-	return output
+	return blobs
 }
 
-func createBlobOutput(blobItem az.BlobItemInternal, wg *sync.WaitGroup, c chan string, downloadContent bool, containerURL azblob.ContainerURL) {
+func parseBlobProperties(properties az.BlobProperties) map[string]string {
+	result := make(map[string]string)
+	//result["Blob Type"] = properties.BlobType
+	result["Content MD5"] = b64.StdEncoding.EncodeToString(properties.ContentMD5)
+	result["Created at"] = properties.CreationTime.String()
+	result["Last modified at"] = properties.LastModified.String()
+	//result["Lease Status"] = properties.LeaseStatus
+	//result["Lease State"] = properties.LeaseState
+	//result["Lease Duration"] = properties.LeaseDuration
+
+	return result
+}
+
+func createBlobOutput(blobItem az.BlobItemInternal, wg *sync.WaitGroup, c chan blob, downloadContent bool, containerURL azblob.ContainerURL) {
 	defer wg.Done()
-	var output = ""
-	output = output + createLine(1, fmt.Sprintf("Blob: %s\n", blobItem.Name))
-	output = output + createLine(2, fmt.Sprintf("Blob Type: %s\n", blobItem.Properties.BlobType))
-	output = output + createLine(2, fmt.Sprintf("Content MD5: %s\n", b64.StdEncoding.EncodeToString(blobItem.Properties.ContentMD5)))
-	output = output + createLine(2, fmt.Sprintf("Created at: %s\n", blobItem.Properties.CreationTime))
-	output = output + createLine(2, fmt.Sprintf("Last modified at: %s\n", blobItem.Properties.LastModified))
-	output = output + createLine(2, fmt.Sprintf("Lease Status: %s\n", blobItem.Properties.LeaseStatus))
-	output = output + createLine(2, fmt.Sprintf("Lease State: %s\n", blobItem.Properties.LeaseState))
-	output = output + createLine(2, fmt.Sprintf("Lease Duration: %s\n", blobItem.Properties.LeaseDuration))
+
+	blob := new(blob)
+	blob.Name = blobItem.Name
+	blob.Properties = parseBlobProperties(blobItem.Properties)
 
 	if downloadContent {
-		content := downloadBlob(blobItem.Name, containerURL)
-		output = output + createLine(2, fmt.Sprintf("Content: %s\n", content))
+		blob.Content = downloadBlob(blobItem.Name, containerURL)
 	}
 
-	c <- output
+	c <- *blob
 }
 
 func exec(args arguments) {
@@ -199,7 +225,7 @@ func exec(args arguments) {
 	// TODO
 	//line(!args.ContentOnly, 0, URL.String())
 
-	c := make(chan string)
+	c := make(chan *container)
 	var wg sync.WaitGroup
 	for marker := (azblob.Marker{}); marker.NotDone(); {
 		listContainer, err := serviceURL.ListContainersSegment(ctx, marker, azblob.ListContainersSegmentOptions{})
@@ -224,7 +250,9 @@ func exec(args arguments) {
 
 	// channel to print
 	for elem := range c {
-		fmt.Println(elem)
+		m, _ := json.Marshal(elem)
+		fmt.Println(string(m))
+		//fmt.Println(elem)
 	}
 }
 
