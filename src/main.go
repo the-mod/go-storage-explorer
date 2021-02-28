@@ -11,7 +11,6 @@ import (
 	"os"
 	"strings"
 	"sync"
-	"time"
 
 	pipeline "github.com/Azure/azure-pipeline-go/pipeline"
 	"github.com/Azure/azure-storage-blob-go/azblob"
@@ -21,7 +20,7 @@ import (
 
 type blob struct {
 	Name       string            `json:"name"`
-	Content    bytes.Buffer      `json:"content"`
+	Content    []byte            `json:"content"`
 	Properties map[string]string `json:"Properties"`
 }
 
@@ -31,6 +30,7 @@ type container struct {
 }
 
 type storageAccount struct {
+	Name      string      `json:"string"`
 	Container []container `json:"container"`
 }
 
@@ -57,7 +57,9 @@ Complete documentation is available at http://hugo.spf13.com`,
 	},
 }
 
-var defaultFileName = "blobcontent.txt"
+const (
+	defaultFileName = "blobcontent.txt"
+)
 
 func init() {
 	rootCmd.Flags().StringVarP(&largs.AccountName, "accountName", "n", "", "accountName of the Storage Account")
@@ -72,22 +74,7 @@ func init() {
 	rootCmd.MarkFlagRequired("accessKey")
 }
 
-func createLine(level int, content string) string {
-	if level == 0 {
-		return content
-	} else {
-		spacer := "___"
-		prefix := "|"
-
-		for i := 0; i < (level - 1); i++ {
-			prefix = prefix + " |"
-		}
-		line := prefix + spacer + content
-		return line
-	}
-}
-
-func downloadBlob(blobName string, containerUrl az.ContainerURL) bytes.Buffer {
+func downloadBlob(blobName string, containerUrl az.ContainerURL) []byte {
 	blobURL := containerUrl.NewBlockBlobURL(blobName)
 	downloadResponse, err := blobURL.Download(context.Background(), 0, azblob.CountToEnd, azblob.BlobAccessConditions{}, false)
 
@@ -103,7 +90,7 @@ func downloadBlob(blobName string, containerUrl az.ContainerURL) bytes.Buffer {
 		log.Fatalf("Error reading blob %s", blobName)
 	}
 
-	return downloadedData
+	return downloadedData.Bytes()
 }
 
 func storeBlobContent(f *os.File, content string) {
@@ -133,17 +120,19 @@ func parseContainer(azContainer az.ContainerItem, p pipeline.Pipeline, accountNa
 		listBlob, _ := containerServiceURL.ListBlobsFlatSegment(ctx, marker, azblob.ListBlobsSegmentOptions{Details: azblob.BlobListingDetails{Metadata: true}})
 		blobMarker = listBlob.NextMarker
 		blobItems := listBlob.Segment.BlobItems
-		containerResult.Blobs = parseBlobs(containerResult, blobItems, blobFilter, showContent, containerServiceURL)
+		containerResult.Blobs = parseBlobs(blobItems, blobFilter, showContent, containerServiceURL)
 	}
 
 	c <- containerResult
 }
 
-func parseBlobs(containerResult *container, blobItems []az.BlobItemInternal, blobFilter string, showContent bool, containerURL azblob.ContainerURL) []blob {
+func parseBlobs(blobItems []az.BlobItemInternal, blobFilter string, showContent bool, containerURL azblob.ContainerURL) []blob {
 	var blobWg sync.WaitGroup
-	bc := make(chan blob)
+	bc := make(chan *blob)
 
-	blobs := make([]blob, len(blobItems))
+	// TODO: why make made slice with 2 empty entries
+	//blobs := make([]blob, len(blobItems))
+	var blobs []blob
 	for _, blobItem := range blobItems {
 		if len(blobFilter) > 0 && !strings.Contains(blobItem.Name, blobFilter) {
 			continue
@@ -159,25 +148,25 @@ func parseBlobs(containerResult *container, blobItems []az.BlobItemInternal, blo
 
 	// channel to print
 	for elem := range bc {
-		blobs = append(blobs, elem)
+		blobs = append(blobs, *elem)
 	}
 	return blobs
 }
 
 func parseBlobProperties(properties az.BlobProperties) map[string]string {
 	result := make(map[string]string)
-	//result["Blob Type"] = properties.BlobType
+	result["Blob Type"] = string(properties.BlobType)
 	result["Content MD5"] = b64.StdEncoding.EncodeToString(properties.ContentMD5)
 	result["Created at"] = properties.CreationTime.String()
 	result["Last modified at"] = properties.LastModified.String()
-	//result["Lease Status"] = properties.LeaseStatus
-	//result["Lease State"] = properties.LeaseState
-	//result["Lease Duration"] = properties.LeaseDuration
+	result["Lease Status"] = string(properties.LeaseStatus)
+	result["Lease State"] = string(properties.LeaseState)
+	result["Lease Duration"] = string(properties.LeaseDuration)
 
 	return result
 }
 
-func createBlobOutput(blobItem az.BlobItemInternal, wg *sync.WaitGroup, c chan blob, downloadContent bool, containerURL azblob.ContainerURL) {
+func createBlobOutput(blobItem az.BlobItemInternal, wg *sync.WaitGroup, c chan *blob, downloadContent bool, containerURL azblob.ContainerURL) {
 	defer wg.Done()
 
 	blob := new(blob)
@@ -188,7 +177,7 @@ func createBlobOutput(blobItem az.BlobItemInternal, wg *sync.WaitGroup, c chan b
 		blob.Content = downloadBlob(blobItem.Name, containerURL)
 	}
 
-	c <- *blob
+	c <- blob
 }
 
 func exec(args arguments) {
@@ -238,11 +227,11 @@ func exec(args arguments) {
 			wg.Add(1)
 			go parseContainer(val, p, args.AccountName, args.ContainerName, args.BlobName, args.ShowContent, c, &wg, marker)
 		}
-		// Pagination
+		// used for Pagination
 		marker = listContainer.NextMarker
 	}
 
-	// wait for all entries in waitgroup an close channel
+	// wait for all entries in waitgroup and close channel
 	go func() {
 		wg.Wait()
 		close(c)
@@ -252,7 +241,6 @@ func exec(args arguments) {
 	for elem := range c {
 		m, _ := json.Marshal(elem)
 		fmt.Println(string(m))
-		//fmt.Println(elem)
 	}
 }
 
@@ -261,13 +249,13 @@ func exec(args arguments) {
 // and
 // https://github.com/Azure-Samples/storage-blobs-go-quickstart/blob/master/storage-quickstart.go
 func main() {
-	start := time.Now()
+	//start := time.Now()
 
 	rootCmd.Execute()
 
 	// Code to measure
-	duration := time.Since(start)
+	//duration := time.Since(start)
 
 	// Formatted string, such as "2h3m0.5s" or "4.503μs"
-	fmt.Println(duration)
+	//fmt.Println(duration)
 }
