@@ -2,7 +2,7 @@
 
 This tool was build to get quickly and easy Information about Azure Blobs.
 It prints basic attributes and gets metadata from blobs.
-It is also possible to download the content of blobs wether to stdout or to a file.
+It is also possible to download the content of blobs.
 Furthermore it is possible to filter for a certain Storage Container Names or/and Blob names.
 
 ## Parameter
@@ -12,6 +12,6 @@ Furthermore it is possible to filter for a certain Storage Container Names or/an
 * `--container` or `-c`: (optional) filter for a specific container by it names. Substring match
 * `--blob` or `-b`: (optional) filter for specific blobs by it names. Substring match
 * `--show-content`: (optional) prints additionally the content of the blobs
-* `--store-content`: (optional) stores additionally the content to a file. One Line per each Blob Content
-* `--filename` or `-f`: (optional) use together with `--store-content` to store blob contents to given file. Default is `blobcontent.txt`
-* `--content-only`: (optional) prints only the content of blobs to stdout. No other information are printed
+
+## Examples
+* `./asi --accountName <myStorageAccountName> --accessKey <myStorageAccessKey> - c test -b myblob`: will show only blobs including myblob in their names only stored in containers including test in their names.

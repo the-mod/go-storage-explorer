@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"log"
 	"net/url"
-	"os"
 	"strings"
 	"sync"
 
@@ -22,6 +21,7 @@ type blob struct {
 	Name       string            `json:"name"`
 	Content    []byte            `json:"content"`
 	Properties map[string]string `json:"Properties"`
+	Metadata   map[string]string `json:"metadata"`
 }
 
 type container struct {
@@ -35,14 +35,12 @@ type storageAccount struct {
 }
 
 type arguments struct {
-	AccountName   string
-	AccessKey     string
-	ContainerName string
-	BlobName      string
-	ShowContent   bool
-	StoreContent  bool
-	ContentOnly   bool
-	FileName      string
+	AccountName    string
+	AccessKey      string
+	ContainerName  string
+	BlobName       string
+	ShowContent    bool
+	MetadataFilter string
 }
 
 var largs = arguments{}
@@ -58,7 +56,8 @@ Complete documentation is available at http://hugo.spf13.com`,
 }
 
 const (
-	defaultFileName = "blobcontent.txt"
+	storageURLTemplate   = "https://%s.blob.core.windows.net"
+	containerURLTemplate = "https://%s.blob.core.windows.net/%s"
 )
 
 func init() {
@@ -67,9 +66,7 @@ func init() {
 	rootCmd.Flags().StringVarP(&largs.ContainerName, "container", "c", "", "filter for container name with substring match")
 	rootCmd.Flags().StringVarP(&largs.BlobName, "blob", "b", "", "filter for blob name with substring match")
 	rootCmd.Flags().BoolVar(&largs.ShowContent, "show-content", false, "downloads and prints content of blobs in addition to other logs")
-	rootCmd.Flags().BoolVar(&largs.StoreContent, "store-content", false, "downloads and stores content of blob in a file. Use --filename or -f to set a specific filename. Stores one line for each blob")
-	rootCmd.Flags().StringVarP(&largs.FileName, "filename", "f", "", "in addtion")
-	rootCmd.Flags().BoolVar(&largs.ContentOnly, "content-only", false, "prints only content of blob. overrules --show-content")
+	rootCmd.Flags().StringVarP(&largs.MetadataFilter, "metadatafilter", "m", "", "filter for blob metadata. <key>:<value>")
 	rootCmd.MarkFlagRequired("accountName")
 	rootCmd.MarkFlagRequired("accessKey")
 }
@@ -93,10 +90,6 @@ func downloadBlob(blobName string, containerUrl az.ContainerURL) []byte {
 	return downloadedData.Bytes()
 }
 
-func storeBlobContent(f *os.File, content string) {
-	f.WriteString(fmt.Sprintf("%s\n", content))
-}
-
 func parseContainer(azContainer az.ContainerItem, p pipeline.Pipeline, accountName string, containerFilter string, blobFilter string, showContent bool, c chan *container, wg *sync.WaitGroup, marker az.Marker) {
 	defer wg.Done()
 	containerName := azContainer.Name
@@ -110,7 +103,7 @@ func parseContainer(azContainer az.ContainerItem, p pipeline.Pipeline, accountNa
 	containerResult := new(container)
 	containerResult.Name = containerName
 
-	containerURL, _ := url.Parse(fmt.Sprintf("https://%s.blob.core.windows.net/%s", accountName, containerName))
+	containerURL, _ := url.Parse(fmt.Sprintf(containerURLTemplate, accountName, containerName))
 	containerServiceURL := azblob.NewContainerURL(*containerURL, p)
 
 	ctx := context.Background()
@@ -130,6 +123,7 @@ func parseBlobs(blobItems []az.BlobItemInternal, blobFilter string, showContent 
 	bc := make(chan *blob)
 
 	var blobs []blob
+
 	for _, blobItem := range blobItems {
 		if len(blobFilter) > 0 && !strings.Contains(blobItem.Name, blobFilter) {
 			continue
@@ -151,6 +145,7 @@ func parseBlobs(blobItems []az.BlobItemInternal, blobFilter string, showContent 
 
 func parseBlobProperties(properties az.BlobProperties) map[string]string {
 	result := make(map[string]string)
+
 	result["Blob Type"] = string(properties.BlobType)
 	result["Content MD5"] = b64.StdEncoding.EncodeToString(properties.ContentMD5)
 	result["Created at"] = properties.CreationTime.String()
@@ -162,12 +157,29 @@ func parseBlobProperties(properties az.BlobProperties) map[string]string {
 	return result
 }
 
+func containsMetadata(metadata map[string]string, key string, value string) bool {
+	if len(metadata) == 0 {
+		return false
+	}
+	if val, ok := metadata[key]; ok {
+		if strings.Contains(val, value) {
+			return true
+		}
+	}
+	return false
+}
+
 func createBlobOutput(blobItem az.BlobItemInternal, wg *sync.WaitGroup, c chan *blob, downloadContent bool, containerURL azblob.ContainerURL) {
 	defer wg.Done()
+
+	if containsMetadata(blobItem.Metadata, "test", "456") {
+		fmt.Println("####################")
+	}
 
 	blob := new(blob)
 	blob.Name = blobItem.Name
 	blob.Properties = parseBlobProperties(blobItem.Properties)
+	blob.Metadata = blobItem.Metadata
 
 	if downloadContent {
 		blob.Content = downloadBlob(blobItem.Name, containerURL)
@@ -177,22 +189,6 @@ func createBlobOutput(blobItem az.BlobItemInternal, wg *sync.WaitGroup, c chan *
 }
 
 func exec(args arguments) {
-	var f *os.File
-	var err error
-
-	if args.StoreContent {
-		outputFile := defaultFileName
-		if len(args.FileName) > 0 {
-			outputFile = args.FileName
-		}
-
-		f, err = os.Create(outputFile)
-		if err != nil {
-			log.Fatalf("Could not create file %s", outputFile)
-		}
-		defer f.Close()
-	}
-
 	ctx := context.Background()
 
 	// Create a default request pipeline using your storage account name and account key
@@ -203,7 +199,7 @@ func exec(args arguments) {
 	p := azblob.NewPipeline(credential, azblob.PipelineOptions{})
 
 	// From the Azure portal, get your storage account blob service URL endpoint
-	URL, _ := url.Parse(fmt.Sprintf("https://%s.blob.core.windows.net", args.AccountName))
+	URL, _ := url.Parse(fmt.Sprintf(storageURLTemplate, args.AccountName))
 
 	serviceURL := azblob.NewServiceURL(*URL, p)
 
@@ -240,7 +236,6 @@ func exec(args arguments) {
 	}
 
 	s.Container = foundContainer
-
 	print(*s)
 }
 
