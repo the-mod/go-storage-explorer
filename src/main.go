@@ -30,7 +30,7 @@ type container struct {
 }
 
 type storageAccount struct {
-	Name      string      `json:"string"`
+	Name      string      `json:"name"`
 	Container []container `json:"container"`
 }
 
@@ -106,7 +106,7 @@ func parseContainer(azContainer az.ContainerItem, p pipeline.Pipeline, accountNa
 		return
 	}
 
-	// new returns pointer
+	// new returns pointer to the container instance
 	containerResult := new(container)
 	containerResult.Name = containerName
 
@@ -115,7 +115,6 @@ func parseContainer(azContainer az.ContainerItem, p pipeline.Pipeline, accountNa
 
 	ctx := context.Background()
 
-	//var output = createLine(0, containerServiceURL.String()+"\n")
 	for blobMarker := (azblob.Marker{}); blobMarker.NotDone(); {
 		listBlob, _ := containerServiceURL.ListBlobsFlatSegment(ctx, marker, azblob.ListBlobsSegmentOptions{Details: azblob.BlobListingDetails{Metadata: true}})
 		blobMarker = listBlob.NextMarker
@@ -130,8 +129,6 @@ func parseBlobs(blobItems []az.BlobItemInternal, blobFilter string, showContent 
 	var blobWg sync.WaitGroup
 	bc := make(chan *blob)
 
-	// TODO: why make made slice with 2 empty entries
-	//blobs := make([]blob, len(blobItems))
 	var blobs []blob
 	for _, blobItem := range blobItems {
 		if len(blobFilter) > 0 && !strings.Contains(blobItem.Name, blobFilter) {
@@ -146,7 +143,6 @@ func parseBlobs(blobItems []az.BlobItemInternal, blobFilter string, showContent 
 		close(bc)
 	}()
 
-	// channel to print
 	for elem := range bc {
 		blobs = append(blobs, *elem)
 	}
@@ -211,8 +207,9 @@ func exec(args arguments) {
 
 	serviceURL := azblob.NewServiceURL(*URL, p)
 
-	// TODO
-	//line(!args.ContentOnly, 0, URL.String())
+	s := new(storageAccount)
+	s.Name = URL.String()
+	var foundContainer []container
 
 	c := make(chan *container)
 	var wg sync.WaitGroup
@@ -239,9 +236,17 @@ func exec(args arguments) {
 
 	// channel to print
 	for elem := range c {
-		m, _ := json.Marshal(elem)
-		fmt.Println(string(m))
+		foundContainer = append(foundContainer, *elem)
 	}
+
+	s.Container = foundContainer
+
+	print(*s)
+}
+
+func print(sa storageAccount) {
+	m, _ := json.Marshal(sa)
+	fmt.Println(string(m))
 }
 
 // kudos to:
@@ -249,13 +254,5 @@ func exec(args arguments) {
 // and
 // https://github.com/Azure-Samples/storage-blobs-go-quickstart/blob/master/storage-quickstart.go
 func main() {
-	//start := time.Now()
-
 	rootCmd.Execute()
-
-	// Code to measure
-	//duration := time.Since(start)
-
-	// Formatted string, such as "2h3m0.5s" or "4.503μs"
-	//fmt.Println(duration)
 }
