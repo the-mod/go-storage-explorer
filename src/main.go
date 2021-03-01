@@ -90,7 +90,7 @@ func downloadBlob(blobName string, containerUrl az.ContainerURL) []byte {
 	return downloadedData.Bytes()
 }
 
-func parseContainer(azContainer az.ContainerItem, p pipeline.Pipeline, accountName string, containerFilter string, blobFilter string, showContent bool, c chan *container, wg *sync.WaitGroup, marker az.Marker) {
+func parseContainer(azContainer az.ContainerItem, p pipeline.Pipeline, accountName string, containerFilter string, blobFilter string, showContent bool, c chan *container, wg *sync.WaitGroup, marker az.Marker, metadataFilter map[string]string) {
 	defer wg.Done()
 	containerName := azContainer.Name
 
@@ -112,13 +112,13 @@ func parseContainer(azContainer az.ContainerItem, p pipeline.Pipeline, accountNa
 		listBlob, _ := containerServiceURL.ListBlobsFlatSegment(ctx, marker, azblob.ListBlobsSegmentOptions{Details: azblob.BlobListingDetails{Metadata: true}})
 		blobMarker = listBlob.NextMarker
 		blobItems := listBlob.Segment.BlobItems
-		containerResult.Blobs = parseBlobs(blobItems, blobFilter, showContent, containerServiceURL)
+		containerResult.Blobs = parseBlobs(blobItems, blobFilter, showContent, containerServiceURL, metadataFilter)
 	}
 
 	c <- containerResult
 }
 
-func parseBlobs(blobItems []az.BlobItemInternal, blobFilter string, showContent bool, containerURL azblob.ContainerURL) []blob {
+func parseBlobs(blobItems []az.BlobItemInternal, blobFilter string, showContent bool, containerURL azblob.ContainerURL, metadataFilter map[string]string) []blob {
 	var blobWg sync.WaitGroup
 	bc := make(chan *blob)
 
@@ -129,7 +129,7 @@ func parseBlobs(blobItems []az.BlobItemInternal, blobFilter string, showContent 
 			continue
 		}
 		blobWg.Add(1)
-		go createBlobOutput(blobItem, &blobWg, bc, showContent, containerURL)
+		go createBlobOutput(blobItem, &blobWg, bc, showContent, containerURL, metadataFilter)
 	}
 
 	go func() {
@@ -157,35 +157,36 @@ func parseBlobProperties(properties az.BlobProperties) map[string]string {
 	return result
 }
 
-func containsMetadata(metadata map[string]string, key string, value string) bool {
+func containsMetadataMatch(metadata map[string]string, filter map[string]string) bool {
 	if len(metadata) == 0 {
 		return false
 	}
-	if val, ok := metadata[key]; ok {
-		if strings.Contains(val, value) {
-			return true
+
+	for filterKey, filterValue := range filter {
+		if val, ok := metadata[filterKey]; ok {
+			if strings.Contains(val, filterValue) {
+				return true
+			}
 		}
 	}
 	return false
 }
 
-func createBlobOutput(blobItem az.BlobItemInternal, wg *sync.WaitGroup, c chan *blob, downloadContent bool, containerURL azblob.ContainerURL) {
+func createBlobOutput(blobItem az.BlobItemInternal, wg *sync.WaitGroup, c chan *blob, downloadContent bool, containerURL azblob.ContainerURL, metadataFilter map[string]string) {
 	defer wg.Done()
 
-	if containsMetadata(blobItem.Metadata, "test", "456") {
-		fmt.Println("####################")
+	if len(metadataFilter) == 0 || (len(metadataFilter) > 0 && containsMetadataMatch(blobItem.Metadata, metadataFilter)) {
+		blob := new(blob)
+		blob.Name = blobItem.Name
+		blob.Properties = parseBlobProperties(blobItem.Properties)
+		blob.Metadata = blobItem.Metadata
+
+		if downloadContent {
+			blob.Content = downloadBlob(blobItem.Name, containerURL)
+		}
+
+		c <- blob
 	}
-
-	blob := new(blob)
-	blob.Name = blobItem.Name
-	blob.Properties = parseBlobProperties(blobItem.Properties)
-	blob.Metadata = blobItem.Metadata
-
-	if downloadContent {
-		blob.Content = downloadBlob(blobItem.Name, containerURL)
-	}
-
-	c <- blob
 }
 
 func exec(args arguments) {
@@ -216,9 +217,11 @@ func exec(args arguments) {
 			log.Fatal("Error while getting Container")
 		}
 
+		metadataFilter := make(map[string]string)
+		metadataFilter["test"] = "test"
 		for _, val := range listContainer.ContainerItems {
 			wg.Add(1)
-			go parseContainer(val, p, args.AccountName, args.ContainerName, args.BlobName, args.ShowContent, c, &wg, marker)
+			go parseContainer(val, p, args.AccountName, args.ContainerName, args.BlobName, args.ShowContent, c, &wg, marker, metadataFilter)
 		}
 		// used for Pagination
 		marker = listContainer.NextMarker
