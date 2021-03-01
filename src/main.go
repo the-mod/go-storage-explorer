@@ -40,7 +40,7 @@ type arguments struct {
 	ContainerName  string
 	BlobName       string
 	ShowContent    bool
-	MetadataFilter string
+	MetadataFilter []string
 }
 
 var largs = arguments{}
@@ -66,7 +66,7 @@ func init() {
 	rootCmd.Flags().StringVarP(&largs.ContainerName, "container", "c", "", "filter for container name with substring match")
 	rootCmd.Flags().StringVarP(&largs.BlobName, "blob", "b", "", "filter for blob name with substring match")
 	rootCmd.Flags().BoolVar(&largs.ShowContent, "show-content", false, "downloads and prints content of blobs in addition to other logs")
-	rootCmd.Flags().StringVarP(&largs.MetadataFilter, "metadatafilter", "m", "", "filter for blob metadata. <key>:<value>")
+	rootCmd.Flags().StringSliceVarP(&largs.MetadataFilter, "metadata-filter", "m", []string{}, "OR filter for blob metadata. Structure is <key>:<value>")
 	rootCmd.MarkFlagRequired("accountName")
 	rootCmd.MarkFlagRequired("accessKey")
 }
@@ -208,6 +208,17 @@ func exec(args arguments) {
 	s.Name = URL.String()
 	var foundContainer []container
 
+	metadataFilter := make(map[string]string)
+
+	if len(largs.MetadataFilter) > 0 {
+		for _, entry := range largs.MetadataFilter {
+			if strings.Contains(entry, ":") {
+				split := strings.Split(entry, ":")
+				metadataFilter[split[0]] = split[1]
+			}
+		}
+	}
+
 	c := make(chan *container)
 	var wg sync.WaitGroup
 	for marker := (azblob.Marker{}); marker.NotDone(); {
@@ -217,8 +228,6 @@ func exec(args arguments) {
 			log.Fatal("Error while getting Container")
 		}
 
-		metadataFilter := make(map[string]string)
-		metadataFilter["test"] = "test"
 		for _, val := range listContainer.ContainerItems {
 			wg.Add(1)
 			go parseContainer(val, p, args.AccountName, args.ContainerName, args.BlobName, args.ShowContent, c, &wg, marker, metadataFilter)
