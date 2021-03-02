@@ -1,28 +1,16 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	b64 "encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/url"
-	"strings"
 	"sync"
 
-	pipeline "github.com/Azure/azure-pipeline-go/pipeline"
 	"github.com/Azure/azure-storage-blob-go/azblob"
-	az "github.com/Azure/azure-storage-blob-go/azblob"
 	"github.com/spf13/cobra"
 )
-
-type blob struct {
-	Name       string            `json:"name"`
-	Content    []byte            `json:"content"`
-	Properties map[string]string `json:"Properties"`
-	Metadata   map[string]string `json:"metadata"`
-}
 
 type container struct {
 	Name  string `json:"name"`
@@ -32,11 +20,6 @@ type container struct {
 type storageAccount struct {
 	Name      string      `json:"name"`
 	Container []container `json:"container"`
-}
-
-type filter struct {
-	Key   string
-	Value string
 }
 
 type arguments struct {
@@ -74,138 +57,6 @@ func init() {
 	rootCmd.Flags().StringSliceVarP(&largs.MetadataFilter, "metadata-filter", "m", []string{}, "OR filter for blob metadata. Structure is <key>:<value>")
 	rootCmd.MarkFlagRequired("accountName")
 	rootCmd.MarkFlagRequired("accessKey")
-}
-
-func downloadBlob(blobName string, containerUrl az.ContainerURL) []byte {
-	blobURL := containerUrl.NewBlockBlobURL(blobName)
-	downloadResponse, err := blobURL.Download(context.Background(), 0, azblob.CountToEnd, azblob.BlobAccessConditions{}, false)
-
-	if err != nil {
-		log.Fatalf("Error downloading blob %s", blobName)
-	}
-
-	bodyStream := downloadResponse.Body(azblob.RetryReaderOptions{MaxRetryRequests: 20})
-	downloadedData := bytes.Buffer{}
-	_, err = downloadedData.ReadFrom(bodyStream)
-
-	if err != nil {
-		log.Fatalf("Error reading blob %s", blobName)
-	}
-
-	return downloadedData.Bytes()
-}
-
-func parseContainer(azContainer az.ContainerItem, p pipeline.Pipeline, accountName string, containerFilter string, blobFilter string, showContent bool, c chan *container, wg *sync.WaitGroup, marker az.Marker, metadataFilter []filter) {
-	defer wg.Done()
-	containerName := azContainer.Name
-
-	// TODO substring match? to match containers: ['test-1', 'test-2'], term: 'test, matches ['test-1', 'test-2']
-	if len(containerFilter) > 0 && !strings.Contains(containerName, containerFilter) {
-		return
-	}
-
-	// new returns pointer to the container instance
-	containerResult := new(container)
-	containerResult.Name = containerName
-
-	containerURL, _ := url.Parse(fmt.Sprintf(containerURLTemplate, accountName, containerName))
-	containerServiceURL := azblob.NewContainerURL(*containerURL, p)
-
-	ctx := context.Background()
-
-	for blobMarker := (azblob.Marker{}); blobMarker.NotDone(); {
-		listBlob, _ := containerServiceURL.ListBlobsFlatSegment(ctx, marker, azblob.ListBlobsSegmentOptions{Details: azblob.BlobListingDetails{Metadata: true}})
-		blobMarker = listBlob.NextMarker
-		blobItems := listBlob.Segment.BlobItems
-		containerResult.Blobs = parseBlobs(blobItems, blobFilter, showContent, containerServiceURL, metadataFilter)
-	}
-
-	c <- containerResult
-}
-
-func parseBlobs(blobItems []az.BlobItemInternal, blobFilter string, showContent bool, containerURL azblob.ContainerURL, metadataFilter []filter) []blob {
-	var blobWg sync.WaitGroup
-	bc := make(chan *blob)
-
-	var blobs []blob
-
-	for _, blobItem := range blobItems {
-		if len(blobFilter) > 0 && !strings.Contains(blobItem.Name, blobFilter) {
-			continue
-		}
-		blobWg.Add(1)
-		go createBlobOutput(blobItem, &blobWg, bc, showContent, containerURL, metadataFilter)
-	}
-
-	go func() {
-		blobWg.Wait()
-		close(bc)
-	}()
-
-	for elem := range bc {
-		blobs = append(blobs, *elem)
-	}
-	return blobs
-}
-
-func parseBlobProperties(properties az.BlobProperties) map[string]string {
-	result := make(map[string]string)
-
-	result["Blob Type"] = string(properties.BlobType)
-	result["Content MD5"] = b64.StdEncoding.EncodeToString(properties.ContentMD5)
-	result["Created at"] = properties.CreationTime.String()
-	result["Last modified at"] = properties.LastModified.String()
-	result["Lease Status"] = string(properties.LeaseStatus)
-	result["Lease State"] = string(properties.LeaseState)
-	result["Lease Duration"] = string(properties.LeaseDuration)
-
-	return result
-}
-
-func containsMetadataMatch(metadata map[string]string, filter []filter) bool {
-	if len(metadata) == 0 {
-		return false
-	}
-
-	for _, entry := range filter {
-		if val, ok := metadata[entry.Key]; ok {
-			if strings.Contains(val, entry.Value) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func createBlobOutput(blobItem az.BlobItemInternal, wg *sync.WaitGroup, c chan *blob, downloadContent bool, containerURL azblob.ContainerURL, metadataFilter []filter) {
-	defer wg.Done()
-
-	if len(metadataFilter) == 0 || (len(metadataFilter) > 0 && containsMetadataMatch(blobItem.Metadata, metadataFilter)) {
-		blob := new(blob)
-		blob.Name = blobItem.Name
-		blob.Properties = parseBlobProperties(blobItem.Properties)
-		blob.Metadata = blobItem.Metadata
-
-		if downloadContent {
-			blob.Content = downloadBlob(blobItem.Name, containerURL)
-		}
-
-		c <- blob
-	}
-}
-
-func createMetadataFilter(inputFilter []string) []filter {
-	var metadataFilter []filter
-	if len(inputFilter) > 0 {
-		for _, entry := range largs.MetadataFilter {
-			if strings.Contains(entry, ":") {
-				split := strings.Split(entry, ":")
-				f := filter{split[0], split[1]}
-				metadataFilter = append(metadataFilter, f)
-			}
-		}
-	}
-	return metadataFilter
 }
 
 func exec(args arguments) {
