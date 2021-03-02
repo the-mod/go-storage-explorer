@@ -34,6 +34,11 @@ type storageAccount struct {
 	Container []container `json:"container"`
 }
 
+type filter struct {
+	Key   string
+	Value string
+}
+
 type arguments struct {
 	AccountName    string
 	AccessKey      string
@@ -90,7 +95,7 @@ func downloadBlob(blobName string, containerUrl az.ContainerURL) []byte {
 	return downloadedData.Bytes()
 }
 
-func parseContainer(azContainer az.ContainerItem, p pipeline.Pipeline, accountName string, containerFilter string, blobFilter string, showContent bool, c chan *container, wg *sync.WaitGroup, marker az.Marker, metadataFilter map[string]string) {
+func parseContainer(azContainer az.ContainerItem, p pipeline.Pipeline, accountName string, containerFilter string, blobFilter string, showContent bool, c chan *container, wg *sync.WaitGroup, marker az.Marker, metadataFilter []filter) {
 	defer wg.Done()
 	containerName := azContainer.Name
 
@@ -118,7 +123,7 @@ func parseContainer(azContainer az.ContainerItem, p pipeline.Pipeline, accountNa
 	c <- containerResult
 }
 
-func parseBlobs(blobItems []az.BlobItemInternal, blobFilter string, showContent bool, containerURL azblob.ContainerURL, metadataFilter map[string]string) []blob {
+func parseBlobs(blobItems []az.BlobItemInternal, blobFilter string, showContent bool, containerURL azblob.ContainerURL, metadataFilter []filter) []blob {
 	var blobWg sync.WaitGroup
 	bc := make(chan *blob)
 
@@ -157,14 +162,14 @@ func parseBlobProperties(properties az.BlobProperties) map[string]string {
 	return result
 }
 
-func containsMetadataMatch(metadata map[string]string, filter map[string]string) bool {
+func containsMetadataMatch(metadata map[string]string, filter []filter) bool {
 	if len(metadata) == 0 {
 		return false
 	}
 
-	for filterKey, filterValue := range filter {
-		if val, ok := metadata[filterKey]; ok {
-			if strings.Contains(val, filterValue) {
+	for _, entry := range filter {
+		if val, ok := metadata[entry.Key]; ok {
+			if strings.Contains(val, entry.Value) {
 				return true
 			}
 		}
@@ -172,7 +177,7 @@ func containsMetadataMatch(metadata map[string]string, filter map[string]string)
 	return false
 }
 
-func createBlobOutput(blobItem az.BlobItemInternal, wg *sync.WaitGroup, c chan *blob, downloadContent bool, containerURL azblob.ContainerURL, metadataFilter map[string]string) {
+func createBlobOutput(blobItem az.BlobItemInternal, wg *sync.WaitGroup, c chan *blob, downloadContent bool, containerURL azblob.ContainerURL, metadataFilter []filter) {
 	defer wg.Done()
 
 	if len(metadataFilter) == 0 || (len(metadataFilter) > 0 && containsMetadataMatch(blobItem.Metadata, metadataFilter)) {
@@ -187,6 +192,20 @@ func createBlobOutput(blobItem az.BlobItemInternal, wg *sync.WaitGroup, c chan *
 
 		c <- blob
 	}
+}
+
+func createMetadataFilter(inputFilter []string) []filter {
+	var metadataFilter []filter
+	if len(inputFilter) > 0 {
+		for _, entry := range largs.MetadataFilter {
+			if strings.Contains(entry, ":") {
+				split := strings.Split(entry, ":")
+				f := filter{split[0], split[1]}
+				metadataFilter = append(metadataFilter, f)
+			}
+		}
+	}
+	return metadataFilter
 }
 
 func exec(args arguments) {
@@ -208,16 +227,7 @@ func exec(args arguments) {
 	s.Name = URL.String()
 	var foundContainer []container
 
-	metadataFilter := make(map[string]string)
-
-	if len(largs.MetadataFilter) > 0 {
-		for _, entry := range largs.MetadataFilter {
-			if strings.Contains(entry, ":") {
-				split := strings.Split(entry, ":")
-				metadataFilter[split[0]] = split[1]
-			}
-		}
-	}
+	metadataFilter := createMetadataFilter(args.MetadataFilter)
 
 	c := make(chan *container)
 	var wg sync.WaitGroup
@@ -236,13 +246,13 @@ func exec(args arguments) {
 		marker = listContainer.NextMarker
 	}
 
-	// wait for all entries in waitgroup and close channel
+	// wait for all entries in waitgroup and close then the channel
 	go func() {
 		wg.Wait()
 		close(c)
 	}()
 
-	// channel to print
+	// channel to collect results
 	for elem := range c {
 		foundContainer = append(foundContainer, *elem)
 	}
